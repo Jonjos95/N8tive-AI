@@ -2,32 +2,35 @@
 Chat endpoint for streaming AI responses
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import json
 from utils.model_handler import ModelHandler
 from utils.memory_manager import MemoryManager
+from middleware.auth import get_current_user
 
 router = APIRouter()
 model_handler = ModelHandler()
 memory_manager = MemoryManager()
+
 
 class ChatRequest(BaseModel):
     agent_id: str
     message: str
     stream: bool = True
 
+
 @router.post("/chat")
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     """
     Chat endpoint that streams responses from the configured AI model.
     Accepts agent_id and message, injects agent's system prompt, and streams tokens.
     """
     try:
-        # Get agent configuration
-        agent = memory_manager.get_agent(request.agent_id)
+        # Get agent configuration — enforce user ownership
+        agent = memory_manager.get_agent(request.agent_id, user_id=current_user["sub"])
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
         

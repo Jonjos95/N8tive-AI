@@ -29,11 +29,12 @@ class MemoryManager:
         """Initialize SQLite database with tables"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
+
         # Agents table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS agents (
                 id TEXT PRIMARY KEY,
+                user_id TEXT,
                 name TEXT NOT NULL,
                 role TEXT NOT NULL,
                 system_prompt TEXT NOT NULL,
@@ -44,6 +45,12 @@ class MemoryManager:
                 updated_at TEXT NOT NULL
             )
         """)
+
+        # Add user_id column to existing databases that predate this migration
+        try:
+            cursor.execute("ALTER TABLE agents ADD COLUMN user_id TEXT")
+        except Exception:
+            pass  # Column already exists
         
         # Chat history table
         cursor.execute("""
@@ -66,13 +73,19 @@ class MemoryManager:
             with open(self.json_path, "w") as f:
                 json.dump({"agents": {}, "chat_history": {}}, f)
     
-    def list_agents(self) -> List[Dict]:
-        """List all agents"""
+    def list_agents(self, user_id: Optional[str] = None) -> List[Dict]:
+        """List agents, optionally scoped to a user."""
         if self.use_db:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM agents ORDER BY created_at DESC")
+            if user_id:
+                cursor.execute(
+                    "SELECT * FROM agents WHERE user_id = ? ORDER BY created_at DESC",
+                    (user_id,)
+                )
+            else:
+                cursor.execute("SELECT * FROM agents ORDER BY created_at DESC")
             rows = cursor.fetchall()
             agents = [dict(row) for row in rows]
             conn.close()
@@ -80,22 +93,34 @@ class MemoryManager:
         else:
             with open(self.json_path, "r") as f:
                 data = json.load(f)
-            return list(data["agents"].values())
+            agents = list(data["agents"].values())
+            if user_id:
+                agents = [a for a in agents if a.get("user_id") == user_id]
+            return agents
     
-    def get_agent(self, agent_id: str) -> Optional[Dict]:
-        """Get a specific agent"""
+    def get_agent(self, agent_id: str, user_id: Optional[str] = None) -> Optional[Dict]:
+        """Get a specific agent, optionally enforcing user ownership."""
         if self.use_db:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
+            if user_id:
+                cursor.execute(
+                    "SELECT * FROM agents WHERE id = ? AND user_id = ?",
+                    (agent_id, user_id)
+                )
+            else:
+                cursor.execute("SELECT * FROM agents WHERE id = ?", (agent_id,))
             row = cursor.fetchone()
             conn.close()
             return dict(row) if row else None
         else:
             with open(self.json_path, "r") as f:
                 data = json.load(f)
-            return data["agents"].get(agent_id)
+            agent = data["agents"].get(agent_id)
+            if agent and user_id and agent.get("user_id") != user_id:
+                return None
+            return agent
     
     def create_agent(
         self,
@@ -104,27 +129,29 @@ class MemoryManager:
         system_prompt: str,
         tone: str = "professional",
         temperature: float = 0.7,
-        model: str = "gpt-3.5-turbo"
+        model: str = "gpt-3.5-turbo",
+        user_id: Optional[str] = None,
     ) -> str:
-        """Create a new agent"""
+        """Create a new agent owned by user_id."""
         agent_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
-        
+
         if self.use_db:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO agents (id, name, role, system_prompt, tone, temperature, model, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (agent_id, name, role, system_prompt, tone, temperature, model, now, now))
+                INSERT INTO agents (id, user_id, name, role, system_prompt, tone, temperature, model, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (agent_id, user_id, name, role, system_prompt, tone, temperature, model, now, now))
             conn.commit()
             conn.close()
         else:
             with open(self.json_path, "r") as f:
                 data = json.load(f)
-            
+
             data["agents"][agent_id] = {
                 "id": agent_id,
+                "user_id": user_id,
                 "name": name,
                 "role": role,
                 "system_prompt": system_prompt,
@@ -134,10 +161,10 @@ class MemoryManager:
                 "created_at": now,
                 "updated_at": now
             }
-            
+
             with open(self.json_path, "w") as f:
                 json.dump(data, f, indent=2)
-        
+
         return agent_id
     
     def update_agent(self, agent_id: str, updates: Dict) -> bool:
